@@ -25,10 +25,39 @@ const userSchema = new mongoose.Schema({
         type: String,
         default: '#3b82f6'
     },
+    bio: {
+        type: String,
+        maxlength: 200,
+        default: ''
+    },
+    following: [{
+        type: mongoose.Schema.ObjectId,
+        ref: 'User'
+    }],
+    followers: [{
+        type: mongoose.Schema.ObjectId,
+        ref: 'User'
+    }],
+    listeningHistory: [{
+        roomId: String,
+        roomName: String,
+        timestamp: {
+            type: Date,
+            default: Date.now
+        },
+        duration: Number // in seconds
+    }],
     createdAt: {
         type: Date,
         default: Date.now
     }
+});
+
+// Virtual for created rooms count
+userSchema.virtual('createdRooms', {
+    ref: 'Room',
+    localField: '_id',
+    foreignField: 'owner'
 });
 
 // Hash password before saving

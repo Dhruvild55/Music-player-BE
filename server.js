@@ -7,6 +7,7 @@ const dotenv = require('dotenv');
 const cookieParser = require('cookie-parser');
 const authRoutes = require('./routes/authRoutes');
 const playlistRoutes = require('./routes/playlistRoutes');
+const userRoutes = require('./routes/userRoutes');
 const Room = require('./models/Room');
 const User = require('./models/User');
 
@@ -50,6 +51,7 @@ mongoose.connect(process.env.MONGO_URI)
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/playlists', playlistRoutes);
+app.use('/api/users', userRoutes);
 
 const server = http.createServer(app);
 
@@ -190,12 +192,25 @@ io.on('connection', (socket) => {
                 };
             }
 
-            // Store user metadata in memory
             rooms[roomId].users[socket.id] = {
                 id: socket.id,
                 name: userProfile?.name || `User_${socket.id.substring(0, 4)}`,
-                color: userProfile?.color || '#3b82f6'
+                color: userProfile?.color || '#3b82f6',
+                userId: userProfile?.userId || null
             };
+
+            // Notify followers if this user is a DJ (room creator)
+            if (roomData && userProfile?.userId && String(roomData.creatorId) === String(userProfile.userId)) {
+                console.log(`DJ ${userProfile.name} (${userProfile.userId}) joined their room ${roomId}`);
+                // Emit to all connected clients - they'll filter based on who they follow
+                io.emit('dj_went_live', {
+                    djId: userProfile.userId,
+                    djName: userProfile.name,
+                    roomId: roomId,
+                    roomName: roomData.name
+                });
+                console.log(`Broadcasted dj_went_live event for ${userProfile.name}`);
+            }
 
             // Send existing room state to the new user
             const state = {
