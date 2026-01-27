@@ -40,6 +40,7 @@ const roomSchema = new mongoose.Schema({
     queue: [
         {
             id: String,
+            queueId: String,
             title: String,
             thumbnail: String,
             channel: String,

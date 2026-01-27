@@ -222,8 +222,19 @@ io.on('connection', (socket) => {
     });
 
     socket.on('add_to_queue', async ({ roomId, song }) => {
-        console.log(`Add to queue request for room ${roomId}:`, song.title);
         try {
+            const roomData = await Room.findOne({ roomId });
+            if (!roomData) return;
+
+            // Check if song already exists in queue or is current
+            const isDuplicate = roomData.queue.some(s => s.id === song.id) ||
+                (roomData.currentSong && roomData.currentSong.id === song.id);
+
+            if (isDuplicate) {
+                console.log(`[Queue] Blocked duplicate song: ${song.title}`);
+                return socket.emit('queue_feedback', { type: 'error', message: 'Signal already in sequence' });
+            }
+
             const room = await Room.findOneAndUpdate(
                 { roomId },
                 { $push: { queue: song } },
@@ -319,6 +330,64 @@ io.on('connection', (socket) => {
             }
         } catch (err) {
             console.error('Error in next_song:', err);
+        }
+    });
+
+    socket.on('remove_from_queue', async ({ roomId, queueId, userId, guestId }) => {
+        try {
+            const roomConfig = await Room.findOne({ roomId });
+            const effectiveUserId = userId || guestId;
+
+            // Authorization check
+            if (roomConfig && String(roomConfig.creatorId) !== String(effectiveUserId)) {
+                return console.log("Unauthorized removal attempt");
+            }
+
+            const room = await Room.findOneAndUpdate(
+                { roomId },
+                { $pull: { queue: { id: queueId } } },
+                { new: true }
+            );
+
+            if (room) {
+                io.to(roomId).emit('update_queue', room.queue);
+                console.log(`Item ${queueId} removed from ${roomId}`);
+            }
+        } catch (err) {
+            console.error('Error removing from queue:', err);
+        }
+    });
+
+    socket.on('shuffle_queue', async ({ roomId, userId, guestId }) => {
+        try {
+            const roomConfig = await Room.findOne({ roomId });
+            const effectiveUserId = userId || guestId;
+
+            if (roomConfig && String(roomConfig.creatorId) !== String(effectiveUserId)) {
+                return console.log("Unauthorized shuffle attempt");
+            }
+
+            if (!roomConfig || roomConfig.queue.length <= 1) return;
+
+            // Fisher-Yates shuffle
+            const shuffled = [...roomConfig.queue];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+
+            const room = await Room.findOneAndUpdate(
+                { roomId },
+                { queue: shuffled },
+                { new: true }
+            );
+
+            if (room) {
+                io.to(roomId).emit('update_queue', room.queue);
+                console.log(`Queue shuffled for room ${roomId}`);
+            }
+        } catch (err) {
+            console.error('Error shuffling queue:', err);
         }
     });
 
