@@ -17,10 +17,25 @@ const roomSchema = new mongoose.Schema({
         type: Boolean,
         default: true
     },
+    tags: [
+        {
+            type: String,
+            trim: true
+        }
+    ],
+    description: {
+        type: String,
+        trim: true,
+        maxLength: 100
+    },
     owner: {
         type: mongoose.Schema.ObjectId,
         ref: 'User',
-        required: true
+        required: false
+    },
+    creatorId: {
+        type: String,
+        required: false
     },
     queue: [
         {

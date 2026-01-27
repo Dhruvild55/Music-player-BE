@@ -6,6 +6,7 @@ const mongoose = require('mongoose');
 const dotenv = require('dotenv');
 const cookieParser = require('cookie-parser');
 const authRoutes = require('./routes/authRoutes');
+const playlistRoutes = require('./routes/playlistRoutes');
 const Room = require('./models/Room');
 const User = require('./models/User');
 
@@ -18,13 +19,16 @@ const allowedOrigins = [
     "http://localhost:5174",
     "http://localhost:5175",
     "http://localhost:4173",
+    "https://music-palyer-fe.vercel.app",
     process.env.FRONTEND_URL
 ].filter(Boolean).map(url => url.replace(/\/$/, ""));
+
+console.log("Allowed Origins:", allowedOrigins);
 
 app.use(cors({
     origin: (origin, callback) => {
         // Log the origin to help debug live issues
-        console.log(`Incoming request from origin: ${origin}`);
+        if (origin) console.log(`Incoming request from origin: ${origin}`);
 
         if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
             callback(null, true);
@@ -45,12 +49,20 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/playlists', playlistRoutes);
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: allowedOrigins,
+        origin: (origin, callback) => {
+            if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
+                callback(null, true);
+            } else {
+                console.warn(`Socket CORS blocked for origin: ${origin}`);
+                callback(new Error('Not allowed by CORS'));
+            }
+        },
         methods: ["GET", "POST"],
         credentials: true
     }
@@ -66,7 +78,9 @@ const broadcastRooms = async () => {
             id: r.roomId,
             name: r.name,
             userCount: rooms[r.roomId]?.users ? Object.keys(rooms[r.roomId].users).length : 0,
-            currentSong: r.currentSong
+            currentSong: r.currentSong,
+            tags: r.tags || [],
+            description: r.description || ""
         })).sort((a, b) => b.userCount - a.userCount);
 
         io.emit('update_active_rooms', roomsWithStats);
@@ -105,7 +119,7 @@ io.on('connection', (socket) => {
         broadcastRooms();
     });
 
-    socket.on('create_room', async ({ roomId, isPublic, name, userId }) => {
+    socket.on('create_room', async ({ roomId, isPublic, name, userId, guestId, tags, description }) => {
         try {
             let room = await Room.findOne({ roomId });
             if (!room) {
@@ -113,7 +127,10 @@ io.on('connection', (socket) => {
                     roomId,
                     name: name || roomId,
                     isPublic: isPublic !== undefined ? isPublic : true,
-                    owner: userId // Optional ID if logged in
+                    owner: userId,
+                    creatorId: userId || guestId,
+                    tags: tags || [],
+                    description: description || ""
                 });
 
                 if (!rooms[roomId]) {
@@ -123,7 +140,7 @@ io.on('connection', (socket) => {
                         skipVotes: new Set()
                     };
                 }
-                console.log(`Room created in DB: ${roomId}`);
+                console.log(`Room created with tags: ${tags}`);
             }
             broadcastRooms();
         } catch (err) {
@@ -131,21 +148,38 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('join_room', async ({ roomId, userProfile }) => {
+    socket.on('join_room', async ({ roomId, userProfile, guestId }) => {
+        const effectiveUserId = userProfile?.userId || guestId;
+        console.log(`User ${userProfile?.name} (ID: ${effectiveUserId}) joining room: ${roomId}`);
         socket.join(roomId);
 
         try {
             // Fetch room from DB
             let roomData = await Room.findOne({ roomId });
 
-            // Fallback for direct joins to non-existent rooms (create temporary one)
             if (!roomData) {
-                roomData = await Room.create({
-                    roomId,
-                    name: roomId,
-                    isPublic: true,
-                    owner: null
-                });
+                console.log(`[DB] Room not found, attempting to create: ${roomId}`);
+                try {
+                    roomData = await Room.create({
+                        roomId: roomId.toLowerCase(),
+                        name: roomId,
+                        isPublic: true,
+                        owner: userProfile?.userId || null,
+                        creatorId: effectiveUserId
+                    });
+                    console.log(`[DB] Room created successfully in DB: ${roomData.roomId} with creator: ${effectiveUserId}`);
+                } catch (dbErr) {
+                    console.error(`[DB ERROR] Failed to create room ${roomId}:`, dbErr.message);
+                }
+            } else {
+                console.log(`[DB] Found existing room: ${roomData.roomId}`);
+                // Fallback for missing creator info on old rooms (for development)
+                if (!roomData.creatorId) {
+                    console.log(`[DB] Setting missing creatorId for existing room: ${roomId}`);
+                    roomData.creatorId = effectiveUserId;
+                    if (userProfile?.userId) roomData.owner = userProfile.userId;
+                    await Room.findOneAndUpdate({ roomId: roomData.roomId }, { creatorId: effectiveUserId, owner: roomData.owner });
+                }
             }
 
             if (!rooms[roomId]) {
@@ -163,19 +197,21 @@ io.on('connection', (socket) => {
                 color: userProfile?.color || '#3b82f6'
             };
 
-            console.log(`User ${rooms[roomId].users[socket.id].name} joined room ${roomId}`);
-
             // Send existing room state to the new user
-            socket.emit('receive_room_state', {
+            const state = {
                 id: roomData.roomId,
                 name: roomData.name,
-                queue: roomData.queue,
-                currentSong: roomData.currentSong,
-                isPlaying: roomData.isPlaying,
-                currentTime: roomData.currentTime,
-                owner: roomData.owner, // Add this line
+                queue: roomData.queue || [],
+                currentSong: roomData.currentSong || null,
+                isPlaying: roomData.isPlaying || false,
+                currentTime: roomData.currentTime || 0,
+                owner: roomData.owner,
+                creatorId: roomData.creatorId,
                 users: Object.values(rooms[roomId].users)
-            });
+            };
+
+            console.log(`Sending state to user ${socket.id} for room ${roomId}`);
+            socket.emit('receive_room_state', state);
 
             // Notify others
             io.to(roomId).emit('update_listeners', Object.values(rooms[roomId].users));
@@ -186,6 +222,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('add_to_queue', async ({ roomId, song }) => {
+        console.log(`Add to queue request for room ${roomId}:`, song.title);
         try {
             const room = await Room.findOneAndUpdate(
                 { roomId },
@@ -194,34 +231,69 @@ io.on('connection', (socket) => {
             );
 
             if (room) {
+                console.log(`Queue updated for ${roomId}, length: ${room.queue.length}`);
                 io.to(roomId).emit('update_queue', room.queue);
 
                 // If no song is playing, start this one
                 if (!room.currentSong) {
+                    console.log(`No song playing in ${roomId}, auto-starting added song`);
                     const nextSong = room.queue.shift();
                     const updatedRoom = await Room.findOneAndUpdate(
                         { roomId },
                         {
                             currentSong: nextSong,
                             queue: room.queue,
-                            isPlaying: true
+                            isPlaying: true,
+                            currentTime: 0
                         },
                         { new: true }
                     );
                     io.to(roomId).emit('receive_play_song', updatedRoom.currentSong);
                     io.to(roomId).emit('update_queue', updatedRoom.queue);
                 }
+            } else {
+                console.warn(`Room ${roomId} not found during add_to_queue`);
             }
         } catch (err) {
             console.error('Error adding to queue:', err);
         }
     });
 
-    socket.on('next_song', async (roomId) => {
+    socket.on('delete_room', async ({ roomId, userId, guestId }) => {
+        try {
+            const room = await Room.findOne({ roomId });
+            if (!room) return;
+
+            const effectiveUserId = userId || guestId;
+
+            // Only creator can delete
+            if (room.creatorId && String(room.creatorId) !== String(effectiveUserId)) {
+                return socket.emit('error', { message: 'Only the room creator can delete this room.' });
+            }
+
+            await Room.deleteOne({ roomId });
+            console.log(`[DB] Room deleted: ${roomId}`);
+
+            // Inform everyone in the room
+            io.to(roomId).emit('room_deleted');
+
+            // Notify all clients to update their active rooms list
+            broadcastRooms();
+        } catch (err) {
+            console.error('Error deleting room:', err);
+        }
+    });
+
+    socket.on('next_song', async ({ roomId, userId, guestId }) => {
         try {
             const room = await Room.findOne({ roomId });
             if (room) {
-                rooms[roomId].skipVotes = new Set();
+                const effectiveUserId = userId || guestId;
+
+                // Only creator can skip
+                if (room.creatorId && String(room.creatorId) !== String(effectiveUserId)) {
+                    return socket.emit('error', { message: 'Only the room creator can skip songs.' });
+                }
 
                 if (room.queue.length > 0) {
                     const nextSong = room.queue.shift();
@@ -230,7 +302,8 @@ io.on('connection', (socket) => {
                         {
                             currentSong: nextSong,
                             queue: room.queue,
-                            isPlaying: true
+                            isPlaying: true,
+                            currentTime: 0
                         },
                         { new: true }
                     );
@@ -243,10 +316,6 @@ io.on('connection', (socket) => {
                     );
                     io.to(roomId).emit('receive_pause');
                 }
-                io.to(roomId).emit('update_skip_votes', {
-                    count: 0,
-                    threshold: Math.ceil(Object.keys(rooms[roomId].users).length / 2)
-                });
             }
         } catch (err) {
             console.error('Error in next_song:', err);
@@ -257,76 +326,55 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('receive_reaction', { emoji, id: Date.now() });
     });
 
-    socket.on('cast_skip_vote', (roomId) => {
-        if (rooms[roomId]) {
-            if (!rooms[roomId].skipVotes) rooms[roomId].skipVotes = new Set();
-
-            if (rooms[roomId].skipVotes.has(socket.id)) {
-                rooms[roomId].skipVotes.delete(socket.id);
-            } else {
-                rooms[roomId].skipVotes.add(socket.id);
-            }
-
-            const voteCount = rooms[roomId].skipVotes.size;
-            const userCount = Object.keys(rooms[roomId].users).length;
-            const threshold = Math.ceil(userCount / 2);
-
-            io.to(roomId).emit('update_skip_votes', {
-                count: voteCount,
-                threshold: threshold
-            });
-
-            if (voteCount >= threshold) {
-                // Trigger auto-skip
-                rooms[roomId].skipVotes = new Set();
-                if (rooms[roomId].queue.length > 0) {
-                    rooms[roomId].currentSong = rooms[roomId].queue.shift();
-                    io.to(roomId).emit('receive_play_song', rooms[roomId].currentSong);
-                    io.to(roomId).emit('update_queue', rooms[roomId].queue);
-                    io.to(roomId).emit('update_skip_votes', { count: 0, threshold });
-                } else {
-                    rooms[roomId].currentSong = null;
-                    rooms[roomId].isPlaying = false;
-                    io.to(roomId).emit('receive_pause');
-                }
-            }
-        }
-    });
-
     // Relay play event
-    socket.on('send_play', async (data) => {
+    socket.on('send_play', async ({ roomId, time, userId, guestId }) => {
         try {
-            await Room.findOneAndUpdate(
-                { roomId: data.roomId },
-                { isPlaying: true, currentTime: data.time }
-            );
-            socket.to(data.roomId).emit('receive_play', { time: data.time });
+            const room = await Room.findOne({ roomId });
+            if (room) {
+                const effectiveUserId = userId || guestId;
+                if (room.creatorId && String(room.creatorId) !== String(effectiveUserId)) {
+                    return socket.emit('error', { message: 'Only the room creator can play music.' });
+                }
+
+                await Room.findOneAndUpdate({ roomId }, { isPlaying: true, currentTime: time });
+                io.to(roomId).emit('receive_play', { time });
+            }
         } catch (err) {
             console.error('Error in send_play:', err);
         }
     });
 
     // Relay Pause event
-    socket.on('send_pause', async (data) => {
+    socket.on('send_pause', async ({ roomId, userId, guestId }) => {
         try {
-            await Room.findOneAndUpdate(
-                { roomId: data.roomId },
-                { isPlaying: false }
-            );
-            socket.to(data.roomId).emit('receive_pause');
+            const room = await Room.findOne({ roomId });
+            if (room) {
+                const effectiveUserId = userId || guestId;
+                if (room.creatorId && String(room.creatorId) !== String(effectiveUserId)) {
+                    return socket.emit('error', { message: 'Only the room creator can pause music.' });
+                }
+
+                await Room.findOneAndUpdate({ roomId }, { isPlaying: false });
+                io.to(roomId).emit('receive_pause');
+            }
         } catch (err) {
             console.error('Error in send_pause:', err);
         }
     });
 
     // Relay seek event
-    socket.on('send_seek', async (data) => {
+    socket.on('send_seek', async ({ roomId, time, userId, guestId }) => {
         try {
-            await Room.findOneAndUpdate(
-                { roomId: data.roomId },
-                { currentTime: data.time }
-            );
-            socket.to(data.roomId).emit('receive_seek', { time: data.time });
+            const room = await Room.findOne({ roomId });
+            if (room) {
+                const effectiveUserId = userId || guestId;
+                if (room.creatorId && String(room.creatorId) !== String(effectiveUserId)) {
+                    return socket.emit('error', { message: 'Only the room creator can scrub.' });
+                }
+
+                await Room.findOneAndUpdate({ roomId }, { currentTime: time });
+                io.to(roomId).emit('receive_seek', { time });
+            }
         } catch (err) {
             console.error('Error in send_seek:', err);
         }
