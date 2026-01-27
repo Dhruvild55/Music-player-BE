@@ -18,13 +18,17 @@ const allowedOrigins = [
     "http://localhost:5175",
     "http://localhost:4173",
     process.env.FRONTEND_URL
-].filter(Boolean);
+].filter(Boolean).map(url => url.replace(/\/$/, ""));
 
 app.use(cors({
     origin: (origin, callback) => {
-        if (!origin || allowedOrigins.includes(origin)) {
+        // Log the origin to help debug live issues
+        console.log(`Incoming request from origin: ${origin}`);
+
+        if (!origin || allowedOrigins.includes(origin.replace(/\/$/, ""))) {
             callback(null, true);
         } else {
+            console.warn(`CORS blocked for origin: ${origin}`);
             callback(new Error('Not allowed by CORS'));
         }
     },
