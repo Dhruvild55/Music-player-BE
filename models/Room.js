@@ -37,6 +37,12 @@ const roomSchema = new mongoose.Schema({
         type: String,
         required: false
     },
+    djPermissions: [
+        {
+            type: String,
+            ref: 'User'
+        }
+    ],
     queue: [
         {
             id: String,
@@ -62,6 +68,29 @@ const roomSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    songRequests: [
+        {
+            _id: mongoose.Schema.Types.ObjectId,
+            userId: String,
+            userName: String,
+            userColor: String,
+            id: String,
+            queueId: String,
+            title: String,
+            thumbnail: String,
+            channel: String,
+            duration: Number,
+            status: {
+                type: String,
+                enum: ['pending', 'accepted', 'declined'],
+                default: 'pending'
+            },
+            requestedAt: {
+                type: Date,
+                default: Date.now
+            }
+        }
+    ],
     createdAt: {
         type: Date,
         default: Date.now,
