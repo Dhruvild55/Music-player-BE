@@ -426,6 +426,44 @@ const initializeSocket = (io) => {
             io.to(data.roomId).emit('receive_message', data);
         });
 
+        // WebRTC screen sharing signaling - forward offers/answers/candidates and stop events
+        socket.on('screenshare-offer', ({ roomId, to, sdp }) => {
+            try {
+                if (to) {
+                    io.to(to).emit('screenshare-offer', { from: socket.id, sdp });
+                } else {
+                    // broadcast to others in room
+                    socket.to(roomId).emit('screenshare-offer', { from: socket.id, sdp });
+                }
+            } catch (err) {
+                console.error('Error forwarding screenshare-offer', err);
+            }
+        });
+
+        socket.on('screenshare-answer', ({ roomId, to, sdp }) => {
+            try {
+                if (to) io.to(to).emit('screenshare-answer', { from: socket.id, sdp });
+            } catch (err) {
+                console.error('Error forwarding screenshare-answer', err);
+            }
+        });
+
+        socket.on('screenshare-candidate', ({ roomId, to, candidate }) => {
+            try {
+                if (to) io.to(to).emit('screenshare-candidate', { from: socket.id, candidate });
+            } catch (err) {
+                console.error('Error forwarding screenshare-candidate', err);
+            }
+        });
+
+        socket.on('screenshare-stop', ({ roomId }) => {
+            try {
+                socket.to(roomId).emit('screenshare-stop', { from: socket.id });
+            } catch (err) {
+                console.error('Error forwarding screenshare-stop', err);
+            }
+        });
+
         // Request a song
         socket.on('request_song', async ({ roomId, song, userId, guestId, userName, userColor }) => {
             try {
